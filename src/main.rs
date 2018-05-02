@@ -15,11 +15,11 @@ extern crate fern;
 
 use std::collections::HashMap;
 
-use actix_web::{http, server, App, Json};
+use actix_web::{http, server, App, Json, HttpResponse};
 
 header! { (XCachetToken, "X-Cachet-Token") => [String] }
 
-fn hook(alert: Json<AlertHook>) -> String {
+fn hook(alert: Json<AlertHook>) -> HttpResponse {
     info!("{:?}", alert);
     let mut map = HashMap::new();
     map.insert(
@@ -33,20 +33,25 @@ fn hook(alert: Json<AlertHook>) -> String {
     match client
         .put(&format!(
             "{endpoint}/api/v1/components/{component}",
-            endpoint = include_str!("cachet_endpoint.txt"),
+            endpoint = match std::env::var("CACHET_BASE_URL") {
+                Ok(val) => val,
+                Err(_) => String::from(include_str!("cachet_endpoint.txt")),
+            },
             component = alert.alerts[0].annotations.component
         ))
         .header(XCachetToken(alert.alerts[0].annotations.token.clone()))
         .json(&map)
         .send()
     {
-        Ok(res) => info!("{:?}", res),
-        Err(err) => error!("{}", err),
+        Ok(res) => {
+            info!("{:?}", res);
+            HttpResponse::new(http::StatusCode::from_u16(res.status().as_u16()).unwrap())
+        },
+        Err(err) => {
+            error!("{}", err);
+            HttpResponse::new(http::StatusCode::INTERNAL_SERVER_ERROR)
+        },
     }
-    format!(
-        "Set component {} to severity {}.",
-        alert.alerts[0].annotations.component, alert.alerts[0].annotations.severity
-    )
 }
 
 fn main() {
