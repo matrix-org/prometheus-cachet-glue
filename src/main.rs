@@ -54,9 +54,15 @@ fn hook(alert: Json<AlertHook>) -> HttpResponse {
     }
 }
 
+fn healthcheck(_: String) -> &'static str {
+    "✅"
+}
+
 fn main() {
     setup_logging(log::LevelFilter::Info);
-    match server::new(|| App::new().route("/", http::Method::POST, hook)).bind("0.0.0.0:8888") {
+    match server::new(|| App::new()
+        .route("/", http::Method::POST, hook)
+        .route("/health", http::Method::GET, healthcheck)).bind("0.0.0.0:8888") {
         Ok(server) => server.run(),
         Err(err) => error!("Couldn't start server: {}", err),
     }
