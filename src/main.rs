@@ -16,6 +16,7 @@ extern crate fern;
 use std::collections::HashMap;
 
 use actix_web::{http, server, App, Json, HttpResponse};
+use actix_web::middleware::Logger;
 
 header! { (XCachetToken, "X-Cachet-Token") => [String] }
 
@@ -61,8 +62,10 @@ fn healthcheck(_: String) -> &'static str {
 fn main() {
     setup_logging(log::LevelFilter::Info);
     match server::new(|| App::new()
+        .middleware(Logger::default())
         .route("/", http::Method::POST, hook)
-        .route("/health", http::Method::GET, healthcheck)).bind("0.0.0.0:8888") {
+        .route("/health", http::Method::GET, healthcheck))
+        .bind("0.0.0.0:8888") {
         Ok(server) => server.run(),
         Err(err) => error!("Couldn't start server: {}", err),
     }
