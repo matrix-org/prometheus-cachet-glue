@@ -1,71 +1,94 @@
 // (De-)Serialization
 extern crate serde;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate serde_derive;
 extern crate serde_json;
 
 // HTTP
 extern crate actix_web;
+extern crate futures;
+#[macro_use]
+extern crate hyper;
 extern crate reqwest;
-#[macro_use] extern crate hyper;
 
 // Logging and CLI
 extern crate chrono;
 extern crate fern;
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 
 use std::collections::HashMap;
 
-use actix_web::{http, server, App, Json, HttpResponse};
+use actix_web::{http, server, App, AsyncResponder, Error, HttpMessage, HttpRequest, HttpResponse};
 use actix_web::middleware::Logger;
+
+use futures::future::Future;
 
 header! { (XCachetToken, "X-Cachet-Token") => [String] }
 
-fn hook(alert: Json<AlertHook>) -> HttpResponse {
-    info!("{:?}", alert);
-    let mut map = HashMap::new();
-    map.insert(
-        "status",
-        match alert.status {
-            Status::Firing => alert.alerts[0].annotations.severity,
-            Status::Resolved => 1,
-        },
-    );
-    let client = reqwest::Client::new();
-    match client
-        .put(&format!(
-            "{endpoint}/api/v1/components/{component}",
-            endpoint = match std::env::var("CACHET_BASE_URL") {
-                Ok(val) => val,
-                Err(_) => String::from(include_str!("cachet_endpoint.txt")),
-            },
-            component = alert.alerts[0].annotations.component
-        ))
-        .header(XCachetToken(alert.alerts[0].annotations.token.clone()))
-        .json(&map)
-        .send()
-    {
-        Ok(res) => {
-            info!("{:?}", res);
-            HttpResponse::new(http::StatusCode::from_u16(res.status().as_u16()).unwrap())
-        },
-        Err(err) => {
-            error!("{}", err);
-            HttpResponse::new(http::StatusCode::INTERNAL_SERVER_ERROR)
-        },
-    }
+fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
+    req.clone().json()                          // <- get JsonBody future
+        .from_err()
+        .and_then(move |alert: AlertHook| {  // <- deserialized value
+            info!("{:?}", alert);
+
+            //create map for json of cachet api call
+            let mut map = HashMap::new();
+            map.insert(
+                "status",
+                match alert.status {
+                    Status::Firing => alert.alerts[0].annotations.severity,
+                    Status::Resolved => 1,
+                },
+            );
+
+            //send http put to cachet
+            let client = reqwest::Client::new();
+            let response = match client.put(&format!(
+                    "{endpoint}/api/v1/components/{component}",
+                    endpoint = match std::env::var("CACHET_BASE_URL") {
+                        Ok(val) => val,
+                        Err(_) => String::from(include_str!("cachet_endpoint.txt")),
+                    },
+                    component = alert.alerts[0].annotations.component
+                ))
+                // read "Authorization: Bearer" token into "X-Cachet_Token"
+                .header(XCachetToken(match req.headers().get("Authorization") {
+                    Some(header) => match header.to_str() {
+                        Ok(header) => {
+                            let mut header_prefix = String::from(header);
+                            header_prefix.split_off(7) //cuts of the first 7 chars: "Bearer "
+                        },
+                        Err(_) => return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED)),
+                    },
+                    None => {
+                        return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED));
+                    },
+                })).json(&map).send() {
+                    Ok(res) => res,
+                    Err(err) => {
+                        error!("{}", err);
+                        return Ok(HttpResponse::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+                    }
+                };
+            info!("{:?}", response);
+            Ok(HttpResponse::new(http::StatusCode::from_u16(response.status().as_u16()).unwrap()))
+        }).responder()
 }
 
-fn healthcheck(_: String) -> &'static str {
+fn healthcheck(_: HttpRequest) -> &'static str {
     "✅"
 }
 
 fn main() {
     setup_logging(log::LevelFilter::Info);
-    match server::new(|| App::new()
-        .middleware(Logger::default())
-        .route("/", http::Method::POST, hook)
-        .route("/health", http::Method::GET, healthcheck))
-        .bind("0.0.0.0:8888") {
+    match server::new(|| {
+        App::new()
+            .middleware(Logger::default())
+            .route("/", http::Method::POST, hook)
+            .route("/health", http::Method::GET, healthcheck)
+    }).bind("0.0.0.0:8888")
+    {
         Ok(server) => server.run(),
         Err(err) => error!("Couldn't start server: {}", err),
     }
@@ -153,7 +176,4 @@ pub struct CachetAnnotation {
 
     #[serde(rename = "severity")]
     pub(crate) severity: i32,
-
-    #[serde(rename = "token")]
-    pub(crate) token: String,
 }
