@@ -81,7 +81,7 @@ fn healthcheck(_: HttpRequest) -> &'static str {
 }
 
 fn main() {
-    setup_logging(log::LevelFilter::Info);
+    setup_logging(log::LevelFilter::Debug);
     match server::new(|| {
         App::new()
             .middleware(Logger::default())
@@ -130,13 +130,13 @@ pub struct AlertHook {
     pub(crate) receiver: String,
 
     #[serde(rename = "groupLabels")]
-    pub(crate) group_labels: String,
+    pub(crate) group_labels: HashMap<String, String>,
 
     #[serde(rename = "commonLabels")]
-    pub(crate) common_labels: String,
+    pub(crate) common_labels: HashMap<String, String>,
 
     #[serde(rename = "commonAnnotations")]
-    pub(crate) common_annotations: String,
+    pub(crate) common_annotations: HashMap<String, String>,
 
     #[serde(rename = "externalURL")]
     pub(crate) external_url: String,
@@ -148,7 +148,7 @@ pub struct AlertHook {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Alert {
     #[serde(rename = "labels")]
-    pub(crate) labels: String,
+    pub(crate) labels: HashMap<String, String>,
 
     #[serde(rename = "annotations")]
     pub(crate) annotations: CachetAnnotation,
@@ -172,8 +172,29 @@ pub enum Status {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CachetAnnotation {
     #[serde(rename = "component")]
-    pub(crate) component: i32,
+    #[serde(with = "numi8")]
+    pub(crate) component: i8,
 
     #[serde(rename = "severity")]
-    pub(crate) severity: i32,
+    #[serde(with = "numi8")]
+    pub(crate) severity: i8,
+}
+
+pub mod numi8 {
+    use serde::{Deserialize, Serializer, Deserializer};
+    use serde::de::Error;
+    pub fn serialize<S>(value: &i8, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+    {
+        serializer.serialize_str(&format!("{}", value)[..])
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<i8, D::Error>
+        where
+            D: Deserializer<'de>,
+    {
+        let result = String::deserialize(deserializer)?;
+        result.parse::<i8>().map_err(|_| D::Error::custom("something happened"))
+    }
 }
