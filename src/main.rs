@@ -37,6 +37,12 @@ fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
         .and_then(move |alert: AlertHook| {  // <- deserialized value
             info!("{:?}", alert);
 
+            match alert.alerts.len() {
+                1 => info!("found one alert, as expected"),
+                _ => return Ok(HttpResponse::with_body(http::StatusCode::INTERNAL_SERVER_ERROR, "Expected exactly one alert."))
+
+            }
+
             //create map for json of cachet api call
             let mut map = HashMap::new();
             map.insert(
