@@ -84,7 +84,7 @@ fn get_bearer_token(req: HttpRequest) -> Result<String, String> {
     match req.headers().get("Authorization") {
         Some(header) => match header.to_str() {
             Ok(header) => match BEARER_REGEX.captures(header) {
-                Some(cap) => Ok(cap[0].to_string()),
+                Some(cap) => Ok(cap[1].to_string()),
                 None => Err(format!(
                     "Authorization header does not contain a Bearer token."
                 )),
