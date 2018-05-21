@@ -2,7 +2,10 @@
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+extern crate regex;
 extern crate serde_json;
+#[macro_use]
+extern crate lazy_static;
 
 // HTTP
 extern crate actix_web;
@@ -17,20 +20,20 @@ extern crate fern;
 #[macro_use]
 extern crate log;
 
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
-use std::collections::HashMap;
-
-use actix_web::{http, server, App, AsyncResponder, Error, HttpMessage, HttpRequest, HttpResponse};
-use actix_web::middleware::Logger;
+use actix_web::{http, server, App, AsyncResponder, Error, HttpMessage, HttpRequest, HttpResponse,
+                middleware::Logger};
 
 use futures::future::Future;
+
+use regex::Regex;
 
 header! { (XCachetToken, "X-Cachet-Token") => [String] }
 
 fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
-    req.clone().json()                          // <- get JsonBody future
-        .from_err()
+    req.clone().json()                       // <- get JsonBody future
+        .from_err()                          // <- automap to the error type we might want
         .and_then(move |alert: AlertHook| {  // <- deserialized value
             info!("{:?}", alert);
 
@@ -47,41 +50,49 @@ fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
             //send http put to cachet
             let client = reqwest::Client::new();
             let response = match client.put(&format!(
-                    "{endpoint}/api/v1/components/{component}",
-                    endpoint = match std::env::var("CACHET_BASE_URL") {
-                        Ok(val) => val,
-                        Err(_) => String::from(include_str!("cachet_endpoint.txt")),
-                    },
-                    component = alert.alerts[0].annotations.component
-                ))
+                "{endpoint}/api/v1/components/{component}",
+                endpoint = match std::env::var("CACHET_BASE_URL") {
+                    Ok(val) => val,
+                    Err(_) => String::from(include_str!("cachet_endpoint.txt")),
+                },
+                component = alert.alerts[0].annotations.component
+            ))
                 // read "Authorization: Bearer" token into "X-Cachet_Token"
-                .header(XCachetToken(match req.headers().get("Authorization") {
-                    Some(header) => {
-                        match header.to_str() {
-                            Ok(header) => {
-                                let mut header_prefix = String::from(header);
-                                header_prefix.split_off(7) //cuts of the first 7 chars: "Bearer "
-                            },
-                            Err(err) => {
-                                error!("Unable to find bearer token in the \"Authorization\" header: {}", err);
-                                return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED));
-                            },
-                        }
-                    },
-                    None => {
-                        error!("No Authorization Header found");
-                        return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED));
-                    },
-                })).json(&map).send() {
-                    Ok(res) => res,
+                .header(XCachetToken(match get_bearer_token(req) {
+                    Ok(token) => token,
                     Err(err) => {
-                        error!("Could not contact the cachet API: {}", err);
-                        return Ok(HttpResponse::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+                        error!("Unable to find bearer token in the \"Authorization\" header: {}", err);
+                        return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED));
                     }
-                };
+                }
+                )).json(&map).send() {
+                Ok(res) => res,
+                Err(err) => {
+                    error!("Could not contact the cachet API: {}", err);
+                    return Ok(HttpResponse::new(http::StatusCode::INTERNAL_SERVER_ERROR));
+                }
+            };
             info!("{:?}", response);
             Ok(HttpResponse::new(http::StatusCode::from_u16(response.status().as_u16()).unwrap()))
         }).responder()
+}
+
+fn get_bearer_token(req: HttpRequest) -> Result<String, String> {
+    lazy_static! {
+        static ref BEARER_REGEX: Regex = Regex::new(r"^Bearer (.*)$").unwrap();
+    }
+    match req.headers().get("Authorization") {
+        Some(header) => match header.to_str() {
+            Ok(header) => match BEARER_REGEX.captures(header) {
+                Some(cap) => Ok(cap[0].to_string()),
+                None => Err(format!(
+                    "Authorization header does not contain a Bearer token."
+                )),
+            },
+            Err(err) => Err(format!("{}", err)),
+        },
+        None => Err(format!("No authorization header found")),
+    }
 }
 
 fn health_check(_: HttpRequest) -> &'static str {
@@ -200,8 +211,9 @@ pub struct CachetAnnotation {
  * so we need to parse it back to a number here.
  */
 pub mod numi8 {
-    use serde::{Deserialize, Deserializer, Serializer};
     use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+
     pub fn serialize<S>(value: &i8, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
