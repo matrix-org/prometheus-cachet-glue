@@ -17,6 +17,8 @@ extern crate fern;
 #[macro_use]
 extern crate log;
 
+use std::str::FromStr;
+
 use std::collections::HashMap;
 
 use actix_web::{http, server, App, AsyncResponder, Error, HttpMessage, HttpRequest, HttpResponse};
@@ -54,20 +56,26 @@ fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
                 ))
                 // read "Authorization: Bearer" token into "X-Cachet_Token"
                 .header(XCachetToken(match req.headers().get("Authorization") {
-                    Some(header) => match header.to_str() {
-                        Ok(header) => {
-                            let mut header_prefix = String::from(header);
-                            header_prefix.split_off(7) //cuts of the first 7 chars: "Bearer "
-                        },
-                        Err(_) => return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED)),
+                    Some(header) => {
+                        match header.to_str() {
+                            Ok(header) => {
+                                let mut header_prefix = String::from(header);
+                                header_prefix.split_off(7) //cuts of the first 7 chars: "Bearer "
+                            },
+                            Err(err) => {
+                                error!("Unable to find bearer token in the \"Authorization\" header: {}", err);
+                                return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED));
+                            },
+                        }
                     },
                     None => {
+                        error!("No Authorization Header found");
                         return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED));
                     },
                 })).json(&map).send() {
                     Ok(res) => res,
                     Err(err) => {
-                        error!("{}", err);
+                        error!("Could not contact the cachet API: {}", err);
                         return Ok(HttpResponse::new(http::StatusCode::INTERNAL_SERVER_ERROR))
                     }
                 };
@@ -76,19 +84,27 @@ fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
         }).responder()
 }
 
-fn healthcheck(_: HttpRequest) -> &'static str {
-    "✅"
+fn health_check(_: HttpRequest) -> &'static str {
+    ""
 }
 
 fn main() {
-    setup_logging(log::LevelFilter::Debug);
+    setup_logging(match std::env::var("LOG_LEVEL") {
+        Ok(val) => match log::LevelFilter::from_str(&val) {
+            Ok(level) => level,
+            Err(_) => log::LevelFilter::Warn,
+        },
+        Err(_) => log::LevelFilter::Warn,
+    });
     match server::new(|| {
         App::new()
             .middleware(Logger::default())
             .route("/", http::Method::POST, hook)
-            .route("/health", http::Method::GET, healthcheck)
-    }).bind("0.0.0.0:8888")
-    {
+            .route("/health", http::Method::GET, health_check)
+    }).bind(match std::env::var("BIND_ADDRESS") {
+        Ok(val) => val,
+        Err(_) => String::from("0.0.0.0:8888"),
+    }) {
         Ok(server) => server.run(),
         Err(err) => error!("Couldn't start server: {}", err),
     }
@@ -118,46 +134,46 @@ fn setup_logging(level: log::LevelFilter) {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AlertHook {
     #[serde(rename = "version")]
-    pub(crate) version: String,
+    version: String,
 
     #[serde(rename = "groupKey")]
-    pub(crate) group_key: String,
+    group_key: String,
 
     #[serde(rename = "status")]
-    pub(crate) status: Status,
+    status: Status,
 
     #[serde(rename = "receiver")]
-    pub(crate) receiver: String,
+    receiver: String,
 
     #[serde(rename = "groupLabels")]
-    pub(crate) group_labels: HashMap<String, String>,
+    group_labels: HashMap<String, String>,
 
     #[serde(rename = "commonLabels")]
-    pub(crate) common_labels: HashMap<String, String>,
+    common_labels: HashMap<String, String>,
 
     #[serde(rename = "commonAnnotations")]
-    pub(crate) common_annotations: HashMap<String, String>,
+    common_annotations: HashMap<String, String>,
 
     #[serde(rename = "externalURL")]
-    pub(crate) external_url: String,
+    external_url: String,
 
     #[serde(rename = "alerts")]
-    pub(crate) alerts: Vec<Alert>,
+    alerts: Vec<Alert>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Alert {
     #[serde(rename = "labels")]
-    pub(crate) labels: HashMap<String, String>,
+    labels: HashMap<String, String>,
 
     #[serde(rename = "annotations")]
-    pub(crate) annotations: CachetAnnotation,
+    annotations: CachetAnnotation,
 
     #[serde(rename = "startsAt")]
-    pub(crate) starts_at: String,
+    starts_at: String,
 
     #[serde(rename = "endsAt")]
-    pub(crate) ends_at: String,
+    ends_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -173,28 +189,33 @@ pub enum Status {
 pub struct CachetAnnotation {
     #[serde(rename = "component")]
     #[serde(with = "numi8")]
-    pub(crate) component: i8,
+    component: i8,
 
     #[serde(rename = "severity")]
     #[serde(with = "numi8")]
-    pub(crate) severity: i8,
+    severity: i8,
 }
 
+/* For some reason alertmanager decides to make strings out of all the annotations,
+ * so we need to parse it back to a number here.
+ */
 pub mod numi8 {
-    use serde::{Deserialize, Serializer, Deserializer};
+    use serde::{Deserialize, Deserializer, Serializer};
     use serde::de::Error;
     pub fn serialize<S>(value: &i8, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
         serializer.serialize_str(&format!("{}", value)[..])
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<i8, D::Error>
-        where
-            D: Deserializer<'de>,
+    where
+        D: Deserializer<'de>,
     {
         let result = String::deserialize(deserializer)?;
-        result.parse::<i8>().map_err(|_| D::Error::custom("something happened"))
+        result
+            .parse::<i8>()
+            .map_err(|_| D::Error::custom("something happened"))
     }
 }
