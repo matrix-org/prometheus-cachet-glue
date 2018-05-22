@@ -1,0 +1,2 @@
+#!/bin/sh
+su-exec ${UID}:${GID} /usr/local/bin/prometheus-cachet-glue
