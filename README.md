@@ -26,6 +26,9 @@ environment variable. Please note that this is not supposed to end with a slash.
 The daemon is listening for http requests on port 8888.
 You should use a reverse proxy for TLS termination in front of that.
 
+If the `CACHET_AUTH_TOKEN` env var is set, then missing Authentication headers will use that value.
+Only set `CACHET_AUTH_TOKEN` if your are running in a secure environment.
+
 ### Building
 
 You need to have a local rust toolchain installed. 

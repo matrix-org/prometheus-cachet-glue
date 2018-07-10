@@ -97,7 +97,10 @@ fn get_bearer_token(req: HttpRequest) -> Result<String, String> {
             },
             Err(err) => Err(format!("{}", err)),
         },
-        None => Err(format!("No authorization header found")),
+        None => match std::env::var("CACHET_AUTH_TOKEN") {
+           Ok(val) => Ok(val),
+           Err(_) => Err(format!("No Authorization header")),
+        }
     }
 }
 
