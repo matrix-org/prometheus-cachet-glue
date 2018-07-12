@@ -1,4 +1,4 @@
-FROM docker.io/alpine:edge as builder
+FROM docker.io/alpine:3.8 as builder
 COPY . /src
 RUN apk add --no-cache \
       cargo \
@@ -8,7 +8,7 @@ RUN apk add --no-cache \
  && cargo build --release
 
 
-FROM docker.io/alpine:edge
+FROM docker.io/alpine:3.8
 ENV UID=1337 \
     GID=1337
 COPY --from=builder /src/target/release/prometheus-cachet-glue /usr/local/bin/prometheus-cachet-glue
