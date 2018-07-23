@@ -37,7 +37,7 @@ fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
     req.clone().json()                       // <- get JsonBody future
         .from_err()                          // <- automap to the error type we might want
         .and_then(move |alert_hook: AlertHook| {  // <- deserialized value
-            info!("{:?}", alert_hook);
+            debug!("{:#?}", alert_hook);
 
             let mut components : HashMap<i8, i8> = HashMap::new();
             let mut responses = Vec::new();
@@ -58,6 +58,7 @@ fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
                     _ => {},
                 };
             }
+            debug!("Component statuses: {:#?}", components);
 
             let http_client = reqwest::Client::new();
 
@@ -177,13 +178,19 @@ fn setup_logging(level: log::LevelFilter) {
     match fern::Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
-                "[{}][{}] {}",
+                "[{}][{}][{}] {}",
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                 record.level(),
+                record.target(),
                 message
             ))
         })
         .level(level)
+        //This line is to avoid being flooded with event loop messages
+        //(one per thread and second, so 12Hz for a hyperthreaded hexacore)
+        //while running with LOG_LEVEL=debug
+        .level_for("tokio_reactor", log::LevelFilter::Error)
+        .level_for("tokio_core", log::LevelFilter::Error)
         .chain(std::io::stdout())
         .apply()
     {
