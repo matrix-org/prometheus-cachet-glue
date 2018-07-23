@@ -22,8 +22,10 @@ extern crate log;
 
 use std::{collections::HashMap, str::FromStr};
 
-use actix_web::{http, server, App, AsyncResponder, Error, HttpMessage, HttpRequest, HttpResponse,
-                middleware::Logger};
+use actix_web::{
+    http, middleware::Logger, server, App, AsyncResponder, Error, HttpMessage, HttpRequest,
+    HttpResponse,
+};
 
 use futures::future::Future;
 
@@ -34,52 +36,93 @@ header! { (XCachetToken, "X-Cachet-Token") => [String] }
 fn hook(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
     req.clone().json()                       // <- get JsonBody future
         .from_err()                          // <- automap to the error type we might want
-        .and_then(move |alert: AlertHook| {  // <- deserialized value
-            info!("{:?}", alert);
+        .and_then(move |alert_hook: AlertHook| {  // <- deserialized value
+            info!("{:?}", alert_hook);
 
-            match alert.alerts.len() {
-                1 => info!("found one alert, as expected"),
-                _ => return Ok(HttpResponse::with_body(http::StatusCode::INTERNAL_SERVER_ERROR, "Expected exactly one alert."))
+            let mut components : HashMap<i8, i8> = HashMap::new();
+            let mut responses = Vec::new();
 
+            for alert in alert_hook.alerts {
+                let current_severity : i8 = match components.get(&alert.annotations.component) {
+                    Some(severity) => *severity,
+                    None => 0 as i8,
+                }.clone();
+                let target_severity = match alert.status {
+                    Status::Firing => alert.annotations.severity,
+                    Status::Resolved => 1,
+                };
+                match current_severity {
+                    n if n < target_severity => {
+                        components.insert(alert.annotations.component, target_severity);
+                    }
+                    _ => {},
+                };
             }
 
-            //create map for json of cachet api call
-            let mut map = HashMap::new();
-            map.insert(
-                "status",
-                match alert.status {
-                    Status::Firing => alert.alerts[0].annotations.severity,
-                    Status::Resolved => 1,
-                },
-            );
+            let http_client = reqwest::Client::new();
 
-            //send http put to cachet
-            let client = reqwest::Client::new();
-            let response = match client.put(&format!(
-                "{endpoint}/api/v1/components/{component}",
-                endpoint = match std::env::var("CACHET_BASE_URL") {
-                    Ok(val) => val,
-                    Err(_) => String::from(include_str!("cachet_endpoint.txt")),
-                },
-                component = alert.alerts[0].annotations.component
-            ))
-                // read "Authorization: Bearer" token into "X-Cachet_Token"
-                .header(XCachetToken(match get_bearer_token(req) {
-                    Ok(token) => token,
+            for (component, status) in components {
+
+                //create map for json of cachet api call
+                let mut map = HashMap::new();
+                map.insert("status", status);
+
+                match get_bearer_token(req.clone()) {
+                    Ok(token) => {//send http put to cachet
+                        match http_client.put(&format!(
+                            "{}/api/v1/components/{}",
+                            match std::env::var("CACHET_BASE_URL") {
+                                Ok(val) => val,
+                                Err(_) => String::from(include_str!("cachet_endpoint.txt")),
+                            },
+                            component
+                        ))
+                            // read "Authorization: Bearer" token into "X-Cachet_Token"
+                            .header(XCachetToken(token)).json(&map).send() {
+                            Ok(res) => {
+                                responses.push(CachetResponse {
+                                    http_status: res.status().as_u16(),
+                                    status: CachetAnnotation {
+                                        component,
+                                        severity: status,
+                                    }
+                                })
+                            },
+                            Err(err) => {
+                                error!("Could not contact the cachet API: {}", err);
+                                responses.push(CachetResponse {
+                                    http_status: http::StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                                    status: CachetAnnotation {
+                                        component,
+                                        severity: status,
+                                    }
+                                })
+                            }
+                        }
+                    },
                     Err(err) => {
+                        responses.push(CachetResponse {
+                            http_status: http::StatusCode::UNAUTHORIZED.as_u16(),
+                            status: CachetAnnotation {
+                                component,
+                                severity: status,
+                            }
+                        });
                         error!("Unable to find bearer token in the \"Authorization\" header: {}", err);
-                        return Ok(HttpResponse::new(http::StatusCode::UNAUTHORIZED));
                     }
                 }
-                )).json(&map).send() {
-                Ok(res) => res,
+            };
+
+
+            let (status, body) = match serde_json::to_string(&responses) {
+                Ok(body) => (http::StatusCode::OK, body),
                 Err(err) => {
-                    error!("Could not contact the cachet API: {}", err);
-                    return Ok(HttpResponse::new(http::StatusCode::INTERNAL_SERVER_ERROR));
+                    error!("Couldn't serialize the cachet responses: {}", err);
+                    (http::StatusCode::INTERNAL_SERVER_ERROR, "Couldn't serialize cachet responses.".to_string())
                 }
             };
-            info!("{:?}", response);
-            Ok(HttpResponse::new(http::StatusCode::from_u16(response.status().as_u16()).unwrap()))
+            info!("{:?}", responses);
+            Ok(HttpResponse::with_body(status, body.into_bytes()))
         }).responder()
 }
 
@@ -98,9 +141,9 @@ fn get_bearer_token(req: HttpRequest) -> Result<String, String> {
             Err(err) => Err(format!("{}", err)),
         },
         None => match std::env::var("CACHET_AUTH_TOKEN") {
-           Ok(val) => Ok(val),
-           Err(_) => Err(format!("No Authorization header")),
-        }
+            Ok(val) => Ok(val),
+            Err(_) => Err(format!("No Authorization header")),
+        },
     }
 }
 
@@ -183,6 +226,9 @@ pub struct AlertHook {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Alert {
+    #[serde(rename = "status")]
+    status: Status,
+
     #[serde(rename = "labels")]
     labels: HashMap<String, String>,
 
@@ -194,6 +240,9 @@ pub struct Alert {
 
     #[serde(rename = "endsAt")]
     ends_at: String,
+
+    #[serde(rename = "generatorURL")]
+    generator_url: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -205,6 +254,17 @@ pub enum Status {
     Resolved,
 }
 
+impl PartialEq for Status {
+    fn eq(&self, other: &Status) -> bool {
+        match (self, other) {
+            (Status::Firing, Status::Firing) => true,
+            (Status::Resolved, Status::Resolved) => true,
+            (Status::Firing, Status::Resolved) => false,
+            (Status::Resolved, Status::Firing) => false,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CachetAnnotation {
     #[serde(rename = "component")]
@@ -214,6 +274,15 @@ pub struct CachetAnnotation {
     #[serde(rename = "severity")]
     #[serde(with = "numi8")]
     severity: i8,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CachetResponse {
+    #[serde(rename = "httpStatus")]
+    http_status: u16,
+
+    #[serde(rename = "status")]
+    status: CachetAnnotation,
 }
 
 /* For some reason alertmanager decides to make strings out of all the annotations,
